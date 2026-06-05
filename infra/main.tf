@@ -3,3 +3,4 @@ resource "aws_sqs_queue" "main" {
   visibility_timeout_seconds = var.visibility_timeout_seconds
 }
 #comment test
+#comment test3
