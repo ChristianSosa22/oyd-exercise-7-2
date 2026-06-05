@@ -1,15 +1,14 @@
 name: Terraform CD
 
-
 on:
   push:
     branches: [master]
   pull_request:
     branches: [master]
 
-
 jobs:
-  terraform-ci:
+  terraform-fmt:
+    name: Terraform Format
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -17,27 +16,125 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: hashicorp/setup-terraform@v3
-
-
       - name: Terraform fmt
         run: terraform fmt -check
 
+  terraform-validate:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Terraform init
+        run: terraform init -backend=false
+      - name: Terraform validate
+        run: terraform validate
 
+  terraform-plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
       - name: Terraform init
         run: terraform init -backend-config=envs/dev/backend-dev.hcl
         env:
           AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION:            ${{ secrets.AWS_REGION }}
-
-
-      - name: Terraform validate
-        run: terraform validate
-
-
+          AWS_REGION:            ${{ variables.AWS_REGION }}
       - name: Terraform plan
         run: terraform plan -var-file=envs/dev/dev.tfvars -out=tfplan
         env:
           AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION:            ${{ secrets.AWS_REGION }}
+          AWS_REGION:            ${{ variables.AWS_REGION }}
+      - name: Save plan text
+        run: terraform show -no-color tfplan > plan.txt
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-dev
+          path: |
+            infra/tfplan
+            infra/plan.txt
+      - name: Post plan comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('infra/plan.txt', 'utf8');
+            const body = `## Terraform Plan\n\`\`\`\n${plan}\n\`\`\``;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+  apply-dev:
+    name: Apply Dev
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    needs: [terraform-fmt, terraform-validate, terraform-plan]
+    environment: dev
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-dev
+          path: .
+      - name: Terraform init
+        run: terraform init -backend-config=envs/dev/backend-dev.hcl
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION:            ${{ variables.AWS_REGION }}
+      - name: Terraform apply
+        run: terraform apply tfplan
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION:            ${{ variables.AWS_REGION }}
+
+  apply-staging:
+    name: Apply Staging
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    needs: apply-dev
+    environment: staging
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-dev
+          path: .
+      - name: Terraform init
+        run: terraform init -backend-config=envs/staging/backend-staging.hcl
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION:            ${{ variables.AWS_REGION }}
+      - name: Terraform apply
+        run: terraform apply -var-file=envs/staging/staging.tfvars
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION:            ${{ variables.AWS_REGION }}
+
